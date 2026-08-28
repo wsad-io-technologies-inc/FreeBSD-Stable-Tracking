@@ -5,6 +5,10 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   sync-and-stage:
     runs-on: ubuntu-latest
@@ -28,26 +32,35 @@ jobs:
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 600
 
-      - name: Add FreeBSD Upstream Remote
+      - name: Setup SSH Agent for Upstream
+        uses: webfactory/ssh-agent@v9
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add FreeBSD Upstream Remote (SSH) & Fetch
         run: |
-          git remote add upstream https://github.com/freebsd/freebsd-src.git
-          git fetch upstream
+          git remote add upstream git@github.com:freebsd/freebsd-src.git
+          git fetch upstream --prune
 
-      - name: Sync upstream/main
+      - name: Dynamically Sync Upstream Branches, Overlay Midstream, and Build Downstream Staging
         run: |
-          git push origin refs/remotes/upstream/main:refs/heads/upstream/main --force-with-lease
+          # Loop through upstream main and all stable/* branches automatically
+          for ref in $(git branch -r | grep -E 'upstream/(main$|stable/)'); do
+            branch_path=${ref#upstream/}                  # e.g., "main" or "stable/14"
+            safe_name=$(echo "$branch_path" | tr '/' '-')   # e.g., "main" or "stable-14"
 
-      - name: "Sync upstream stable branches and generate downstream staging (Example: stable/14)"
-        run: |
-          if git ls-remote --exit-code --heads upstream stable/14; then
-            # 1. Update the upstream mirror branch first
-            git push origin refs/remotes/upstream/stable/14:refs/heads/upstream/stable-14 --force-with-lease
+            echo "=================================================="
+            echo "Processing upstream branch: $branch_path"
+            echo "=================================================="
 
-            # 2. Setup the downstream staging branch starting from the updated upstream stable branch
-            git checkout -B downstream/staging-release-14 refs/remotes/upstream/stable/14
+            # 1. Update the upstream mirror branch on origin
+            git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease
 
-            # 3. Check if a matching midstream branch exists on origin
-            MIDSTREAM_BRANCH="midstream/stable-14"
+            # 2. Setup the downstream staging branch starting from the updated upstream branch
+            git checkout -B downstream/staging-$safe_name refs/remotes/upstream/$branch_path
+
+            # 3. Check if a matching midstream branch exists on origin (e.g., midstream/main or midstream/stable-14)
+            MIDSTREAM_BRANCH="midstream/$safe_name"
             
             if git ls-remote --exit-code --heads origin "$MIDSTREAM_BRANCH"; then
               echo "Midstream branch '$MIDSTREAM_BRANCH' found. Overlaying changes..."
@@ -55,7 +68,7 @@ jobs:
               
               # Merge midstream shims on top of upstream
               git merge --no-edit origin/"$MIDSTREAM_BRANCH" || {
-                echo "Error: Conflict occurred while merging $MIDSTREAM_BRANCH into staging-release-14."
+                echo "Error: Conflict occurred while merging $MIDSTREAM_BRANCH into downstream/staging-$safe_name."
                 exit 1
               }
             else
@@ -63,5 +76,5 @@ jobs:
             fi
 
             # 4. Push the final combined staging candidate to downstream
-            git push origin downstream/staging-release-14 --force-with-lease
-          fi
+            git push origin downstream/staging-$safe_name --force-with-lease
+          done
