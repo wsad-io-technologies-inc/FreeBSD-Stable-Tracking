@@ -22,6 +22,10 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
+       - name: Configure Git for Large Operations
+        run: |
+          git config --global core.sshCommandTimeout 300
+
       - name: Add FreeBSD Upstream Remote
         run: |
           git remote add upstream git@github.com:freebsd/freebsd-src.git
