@@ -31,6 +31,7 @@ jobs:
           git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 600
+          git config --global http.version HTTP/1.1
 
       - name: Add FreeBSD Upstream Remote (HTTPS) & Fetch
         run: |
@@ -39,8 +40,8 @@ jobs:
 
       - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream Staging
         run: |
-          # Loop through upstream main and all stable/* branches automatically
-          for ref in $(git branch -r | grep -E 'upstream/(main$|stable/)'); do
+          # Loop through upstream main and all stable/* branches, explicitly ignoring HEAD symbolic refs
+          for ref in $(git branch -r | grep -E 'upstream/(main$|stable/)' | grep -v 'HEAD'); do
             branch_path=${ref#upstream/}                  # e.g., "main" or "stable/14"
             safe_name=$(echo "$branch_path" | tr '/' '-')   # e.g., "main" or "stable-14"
 
