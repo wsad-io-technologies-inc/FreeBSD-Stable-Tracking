@@ -26,17 +26,14 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Maximize compression to bypass GitHub's 2GB push limit
           git config --global core.compression 9
           git config --global http.postBuffer 1073741824
           git config --global http.version HTTP/1.1
 
-      - name: Add FreeBSD Upstream Remote & Shallow Fetch
+      - name: Add FreeBSD Upstream Remote & Fetch
         run: |
           git remote add upstream https://github.com/freebsd/freebsd-src.git
-          
-          # Fetches only the current state, dropping decades of history
-          git fetch upstream --depth=1 --prune --no-tags
+          git fetch upstream --prune --no-tags
 
       - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
@@ -48,8 +45,24 @@ jobs:
             echo "Processing upstream branch: $branch_path"
             echo "=================================================="
 
-            # 1. Update the upstream mirror branch on origin with the shallow snapshot
-            git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease
+            # 1. Update the upstream mirror branch on origin (Chunked or Incremental)
+            if ! git ls-remote --exit-code --heads origin "upstream/$safe_name" > /dev/null 2>&1; then
+              echo "First-time sync detected for $safe_name. Pushing in historical chunks to bypass 2GB limit..."
+              
+              for YEAR in 2005 2015 2022; do
+                EPOCH_HASH=$(git log -1 --format="%H" --until="${YEAR}-01-01" refs/remotes/upstream/$branch_path)
+                if [ -n "$EPOCH_HASH" ]; then
+                  echo "Pushing history up to $YEAR ($EPOCH_HASH)..."
+                  git push origin ${EPOCH_HASH}:refs/heads/upstream/$safe_name
+                fi
+              done
+              
+              echo "Pushing remaining history..."
+              git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name
+            else
+              echo "Branch exists. Performing standard incremental sync..."
+              git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease
+            fi
 
             # 2. Setup the downstream staging branch
             git checkout -B downstream/staging-$safe_name refs/remotes/upstream/$branch_path
@@ -57,11 +70,11 @@ jobs:
             # 3. Check and merge midstream shims if present
             MIDSTREAM_BRANCH="midstream/$safe_name"
             
-            if git ls-remote --exit-code --heads origin "$MIDSTREAM_BRANCH"; then
+            if git ls-remote --exit-code --heads origin "$MIDSTREAM_BRANCH" > /dev/null 2>&1; then
               echo "Midstream branch '$MIDSTREAM_BRANCH' found. Overlaying changes..."
               git fetch origin "$MIDSTREAM_BRANCH"
               
-              git merge --no-edit origin/"$MIDSTREAM_BRANCH" --allow-unrelated-histories || {
+              git merge --no-edit origin/"$MIDSTREAM_BRANCH" || {
                 echo "Error: Conflict occurred while merging $MIDSTREAM_BRANCH."
                 exit 1
               }
