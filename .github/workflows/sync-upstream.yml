@@ -1,0 +1,63 @@
+name: Sync Upstream FreeBSD and Build Staging
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Runs every 6 hours
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+
+jobs:
+  sync-and-stage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git Identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add FreeBSD Upstream Remote
+        run: |
+          git remote add upstream https://github.com/freebsd/freebsd-src.git
+          git fetch upstream
+
+      - name: Sync upstream/main
+        run: |
+          git push origin refs/remotes/upstream/main:refs/heads/upstream/main --force-with-lease
+
+      - name: Sync upstream stable branches and generate downstream staging (Example: stable/14)
+        run: |
+          if git ls-remote --exit-code --heads upstream stable/14; then
+            # 1. Update the upstream mirror branch first
+            git push origin refs/remotes/upstream/stable/14:refs/heads/upstream/stable-14 --force-with-lease
+
+            # 2. Setup the downstream staging branch starting from the updated upstream stable branch
+            git checkout -B downstream/staging-release-14 refs/remotes/upstream/stable/14
+
+            # 3. Check if a matching midstream branch exists on origin (e.g., midstream/stable-14 or midstream/latestversion)
+            # Adjust the midstream branch name pattern as needed for your convention
+            MIDSTREAM_BRANCH="midstream/stable-14"
+            
+            if git ls-remote --exit-code --heads origin "$MIDSTREAM_BRANCH"; then
+              echo "Midstream branch '$MIDSTREAM_BRANCH' found. Overlaying changes..."
+              git fetch origin "$MIDSTREAM_BRANCH"
+              
+              # Merge midstream shims on top of upstream. 
+              # --no-commit or standard merge allows it to layer the filesystem tree.
+              git merge --no-edit origin/"$MIDSTREAM_BRANCH" || {
+                echo "Error: Conflict occurred while merging $MIDSTREAM_BRANCH into staging-release-14."
+                exit 1
+              }
+            else
+              echo "Midstream branch '$MIDSTREAM_BRANCH' not found. Proceeding with vanilla upstream."
+            fi
+
+            # 4. Push the final combined staging candidate to downstream
+            git push origin downstream/staging-release-14 --force-with-lease
+          fi
