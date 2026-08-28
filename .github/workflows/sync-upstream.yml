@@ -24,7 +24,7 @@ jobs:
 
       - name: Add FreeBSD Upstream Remote
         run: |
-          git remote add upstream https://github.com/freebsd/freebsd-src.git
+          git remote add upstream git@github.com:freebsd/freebsd-src.git
           git fetch upstream
 
       - name: Sync upstream/main
