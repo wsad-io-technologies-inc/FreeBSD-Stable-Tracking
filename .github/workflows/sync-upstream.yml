@@ -31,7 +31,7 @@ jobs:
         run: |
           git push origin refs/remotes/upstream/main:refs/heads/upstream/main --force-with-lease
 
-      - name: Sync upstream stable branches and generate downstream staging (Example: stable/14)
+      - name: "Sync upstream stable branches and generate downstream staging (Example: stable/14)"
         run: |
           if git ls-remote --exit-code --heads upstream stable/14; then
             # 1. Update the upstream mirror branch first
@@ -53,7 +53,7 @@ jobs:
                 exit 1
               }
             else
-              echo "Midstream branch '$MIDSNREAM_BRANCH' not found. Proceeding with vanilla upstream."
+              echo "Midstream branch '$MIDSTREAM_BRANCH' not found. Proceeding with vanilla upstream."
             fi
 
             # 4. Push the final combined staging candidate to downstream
