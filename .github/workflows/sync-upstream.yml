@@ -21,26 +21,29 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.PAT_TOKEN }}
 
-      - name: Configure Git Identity
+      - name: Configure Git Identity & Large Repo Optimizations
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Configure Git for Large Operations
-        run: |
-          git config --global http.postBuffer 524288000
-          git config --global http.lowSpeedLimit 1000
-          git config --global http.lowSpeedTime 600
+          
+          # Aggressive tuning kept for safety during repack/merges
+          git config --global http.postBuffer 1073741824
           git config --global http.version HTTP/1.1
+          git config --global core.compression 0
+          git config --global pack.threads 1
+          git config --global pack.windowMemory 2g
 
-      - name: Add FreeBSD Upstream Remote (HTTPS) & Fetch
+      - name: Add FreeBSD Upstream Remote & Shallow Fetch
         run: |
           git remote add upstream https://github.com/freebsd/freebsd-src.git
-          git fetch upstream --prune
+          
+          # THE FIX: --depth=1 grabs ONLY the current tip of the branches. 
+          # This creates a lightweight snapshot from "right now" forward.
+          git fetch upstream --depth=1 --prune --no-tags
 
-      - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream Staging
+      - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
-          # Loop through upstream main and all stable/* branches, explicitly ignoring HEAD symbolic refs
+          # Loop through upstream main and all stable/* branches, ignoring HEAD
           for ref in $(git branch -r | grep -E 'upstream/(main$|stable/)' | grep -v 'HEAD'); do
             branch_path=${ref#upstream/}                  # e.g., "main" or "stable/14"
             safe_name=$(echo "$branch_path" | tr '/' '-')   # e.g., "main" or "stable-14"
@@ -49,22 +52,23 @@ jobs:
             echo "Processing upstream branch: $branch_path"
             echo "=================================================="
 
-            # 1. Update the upstream mirror branch on origin
+            # 1. Update the upstream mirror branch on origin with the shallow snapshot
             git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease
 
-            # 2. Setup the downstream staging branch starting from the updated upstream branch
+            # 2. Setup the downstream staging branch
             git checkout -B downstream/staging-$safe_name refs/remotes/upstream/$branch_path
 
-            # 3. Check if a matching midstream branch exists on origin (e.g., midstream/main or midstream/stable-14)
+            # 3. Check and merge midstream shims if present
             MIDSTREAM_BRANCH="midstream/$safe_name"
             
             if git ls-remote --exit-code --heads origin "$MIDSTREAM_BRANCH"; then
               echo "Midstream branch '$MIDSTREAM_BRANCH' found. Overlaying changes..."
               git fetch origin "$MIDSTREAM_BRANCH"
               
-              # Merge midstream shims on top of upstream
-              git merge --no-edit origin/"$MIDSTREAM_BRANCH" || {
-                echo "Error: Conflict occurred while merging $MIDSTREAM_BRANCH into downstream/staging-$safe_name."
+              # --allow-unrelated-histories added because midstream might have 
+              # older commit history than the new shallow upstream tip.
+              git merge --no-edit origin/"$MIDSTREAM_BRANCH" --allow-unrelated-histories || {
+                echo "Error: Conflict occurred while merging $MIDSTREAM_BRANCH."
                 exit 1
               }
             else
