@@ -33,7 +33,7 @@ jobs:
           git config --global http.lowSpeedTime 600
 
       - name: Setup SSH Agent for Upstream
-        uses: webfactory/ssh-agent@v9
+        uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
