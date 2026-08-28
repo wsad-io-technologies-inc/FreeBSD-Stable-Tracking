@@ -21,32 +21,28 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.PAT_TOKEN }}
 
-      - name: Configure Git Identity & Large Repo Optimizations
+      - name: Configure Git Identity & Network Tuning
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Aggressive tuning kept for safety during repack/merges
+          # Maximize compression to bypass GitHub's 2GB push limit
+          git config --global core.compression 9
           git config --global http.postBuffer 1073741824
           git config --global http.version HTTP/1.1
-          git config --global core.compression 0
-          git config --global pack.threads 1
-          git config --global pack.windowMemory 2g
 
       - name: Add FreeBSD Upstream Remote & Shallow Fetch
         run: |
           git remote add upstream https://github.com/freebsd/freebsd-src.git
           
-          # THE FIX: --depth=1 grabs ONLY the current tip of the branches. 
-          # This creates a lightweight snapshot from "right now" forward.
+          # Fetches only the current state, dropping decades of history
           git fetch upstream --depth=1 --prune --no-tags
 
       - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
-          # Loop through upstream main and all stable/* branches, ignoring HEAD
           for ref in $(git branch -r | grep -E 'upstream/(main$|stable/)' | grep -v 'HEAD'); do
-            branch_path=${ref#upstream/}                  # e.g., "main" or "stable/14"
-            safe_name=$(echo "$branch_path" | tr '/' '-')   # e.g., "main" or "stable-14"
+            branch_path=${ref#upstream/}                  
+            safe_name=$(echo "$branch_path" | tr '/' '-')   
 
             echo "=================================================="
             echo "Processing upstream branch: $branch_path"
@@ -65,8 +61,6 @@ jobs:
               echo "Midstream branch '$MIDSTREAM_BRANCH' found. Overlaying changes..."
               git fetch origin "$MIDSTREAM_BRANCH"
               
-              # --allow-unrelated-histories added because midstream might have 
-              # older commit history than the new shallow upstream tip.
               git merge --no-edit origin/"$MIDSTREAM_BRANCH" --allow-unrelated-histories || {
                 echo "Error: Conflict occurred while merging $MIDSTREAM_BRANCH."
                 exit 1
