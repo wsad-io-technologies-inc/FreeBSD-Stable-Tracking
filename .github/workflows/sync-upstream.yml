@@ -26,7 +26,7 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Aggressive compression and buffering to handle massive objects
+          # Maximize compression and buffer size for heavy object packfiles
           git config --global core.compression 9
           git config --global http.postBuffer 1073741824
           git config --global http.version HTTP/1.1
@@ -38,7 +38,7 @@ jobs:
 
       - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
-          # Added releng/ to track actual FreeBSD releases alongside main and stable
+          # Process main, stable/*, and releng/* release branches
           for ref in $(git branch -r | grep -E 'upstream/(main$|stable/|releng/)' | grep -v 'HEAD'); do
             branch_path=${ref#upstream/}                  
             safe_name=$(echo "$branch_path" | tr '/' '-')   
@@ -47,34 +47,68 @@ jobs:
             echo "Processing upstream branch: $branch_path"
             echo "=================================================="
 
-            # STEP 1: State Check & Resilient Chunked Upload
-            # If the branch is missing OR behind, this array forces Git to evaluate checkpoints.
-            # If a chunk is already pushed, Git instantly skips it ("Everything up-to-date").
-            # If a previous run crashed, this safely resumes from the last successful epoch.
-            EPOCHS=("2008-01-01" "2015-01-01" "2021-01-01" "HEAD")
-            
-            for epoch in "${EPOCHS[@]}"; do
-              if [ "$epoch" = "HEAD" ]; then
-                TARGET_HASH=$(git rev-parse refs/remotes/upstream/$branch_path)
-              else
-                TARGET_HASH=$(git log -1 --format="%H" --until="$epoch" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
-              fi
+            # Fetch existing remote tracking references from origin
+            git fetch origin --prune
 
-              if [ -n "$TARGET_HASH" ]; then
-                echo "Syncing state up to $epoch ($TARGET_HASH)..."
-                # Using || true ensures if a specific mid-point chunk fails due to a network flake, 
-                # the script doesn't die and will retry on the next cron interval.
-                git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name || echo "Chunk push warned, continuing..."
-              fi
-            done
-            
-            # Final sync to ensure the exact tip is aligned, forcing if upstream rewrote history
-            git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease
+            UPSTREAM_TIP=$(git rev-parse refs/remotes/upstream/$branch_path)
+            ORIGIN_UPSTREAM_TIP=$(git rev-parse refs/remotes/origin/upstream/$safe_name 2>/dev/null || echo "")
 
-            # STEP 2: Setup Downstream Staging Base
+            SYNC_COMPLETE=true
+
+            # -----------------------------------------------------------------
+            # STATE 1: INITIALIZATION & INCREMENTAL BACKFILL GATE
+            # -----------------------------------------------------------------
+            if [ "$ORIGIN_UPSTREAM_TIP" != "$UPSTREAM_TIP" ]; then
+              echo "Branch 'upstream/$safe_name' is missing or behind upstream. Verifying timeline..."
+
+              # Generate 1-Year Intervals from 1993 to Current Year
+              CURRENT_YEAR=$(date +%Y)
+              YEARS=$(seq 1993 $CURRENT_YEAR)
+
+              for year in $YEARS; do
+                EPOCH_DATE="${year}-01-01"
+                TARGET_HASH=$(git log -1 --format="%H" --until="$EPOCH_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
+
+                if [ -n "$TARGET_HASH" ]; then
+                  # Check if origin already has this object/commit
+                  if ! git branch -r --contains "$TARGET_HASH" | grep -q "origin/upstream/$safe_name"; then
+                    echo "Backfilling historical chunk for year $year ($TARGET_HASH)..."
+                    if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
+                      echo "::warning::Network threshold reached during $year backfill for $safe_name. Halting backfill for this run."
+                      SYNC_COMPLETE=false
+                      break
+                    fi
+                  fi
+                fi
+              done
+
+              # Final push attempt for the exact head tip if backfilling cleared smoothly
+              if [ "$SYNC_COMPLETE" = true ]; then
+                echo "Pushing final tip ($UPSTREAM_TIP) to origin/upstream/$safe_name..."
+                if ! git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease; then
+                  echo "::warning::Failed to push tip for $safe_name. Will retry on next schedule."
+                  SYNC_COMPLETE=false
+                fi
+              fi
+            else
+              echo "Branch 'upstream/$safe_name' is 100% in sync with FreeBSD upstream."
+            fi
+
+            # Gate Check: Stop early if history backfill is still incomplete for this branch
+            if [ "$SYNC_COMPLETE" = false ]; then
+              echo "::notice::Skipping Midstream overlay and Downstream staging for $safe_name until backfill completes."
+              continue
+            fi
+
+            # -----------------------------------------------------------------
+            # STATE 2: MIDSTREAM OVERLAY & DOWNSTREAM STAGING BUILD
+            # -----------------------------------------------------------------
+            echo "Building downstream staging for $safe_name..."
+
+            # 1. Setup local base from the verified upstream reference
             git checkout -B downstream/staging-$safe_name refs/remotes/upstream/$branch_path
 
-            # STEP 3: Midstream Overlay with Conflict Detection
+            # 2. Check and merge midstream shims if present on origin
             MIDSTREAM_BRANCH="midstream/$safe_name"
             
             if git ls-remote --exit-code --heads origin "$MIDSTREAM_BRANCH" > /dev/null 2>&1; then
@@ -84,13 +118,13 @@ jobs:
               if ! git merge --no-edit origin/"$MIDSTREAM_BRANCH"; then
                 echo "::error::Merge conflict detected while applying $MIDSTREAM_BRANCH to $safe_name!"
                 git merge --abort
-                echo "Skipping staging build for $safe_name until conflict is resolved manually."
-                continue # Skips to the next branch in the loop without crashing the whole job
+                echo "Skipping downstream build for $safe_name until conflict is resolved manually."
+                continue
               fi
             else
               echo "Midstream branch '$MIDSTREAM_BRANCH' not found. Proceeding with vanilla upstream."
             fi
 
-            # STEP 4: Push Final Staging Build
+            # 3. Push the final combined staging candidate to downstream
             git push origin downstream/staging-$safe_name --force-with-lease
           done
