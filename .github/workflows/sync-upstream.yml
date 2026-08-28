@@ -38,8 +38,8 @@ jobs:
 
       - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
-          # Process main, stable/*, and releng/* release branches
-          for ref in $(git branch -r | grep -E 'upstream/(main$|stable/|releng/)' | grep -v 'HEAD'); do
+          # Awk strips leading spaces, and the ^ anchor prevents matching origin/upstream/...
+          for ref in $(git branch -r | awk '{print $1}' | grep -E '^upstream/(main$|stable/|releng/)'); do
             branch_path=${ref#upstream/}                  
             safe_name=$(echo "$branch_path" | tr '/' '-')   
 
