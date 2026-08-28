@@ -37,7 +37,7 @@ jobs:
           git remote add upstream https://github.com/freebsd/freebsd-src.git
           git fetch upstream --prune
 
-      - name: Dynamically Sync Upstream Branches, Overlay Midstream, and Build Downstream Staging
+      - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream Staging
         run: |
           # Loop through upstream main and all stable/* branches automatically
           for ref in $(git branch -r | grep -E 'upstream/(main$|stable/)'); do
