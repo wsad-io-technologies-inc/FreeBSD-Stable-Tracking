@@ -1,44 +1,10 @@
-name: Sync Upstream FreeBSD and Build Staging
-
-on:
-  schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
-jobs:
-  sync-and-stage:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.PAT_TOKEN }}
-
-      - name: Configure Git Identity & Network Tuning
+- name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Maximize compression and buffer size for heavy object packfiles
-          git config --global core.compression 9
-          git config --global http.postBuffer 1073741824
-          git config --global http.version HTTP/1.1
+          # Prioritize main first, then reverse-version sort the rest (newest to oldest)
+          OTHER_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^upstream/(stable/|releng/)' | sort -rV)
+          ALL_BRANCHES="upstream/main $OTHER_BRANCHES"
 
-      - name: Add FreeBSD Upstream Remote & Fetch
-        run: |
-          git remote add upstream https://github.com/freebsd/freebsd-src.git
-          git fetch upstream --prune --no-tags
-
-      - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
-        run: |
-          for ref in $(git branch -r | awk '{print $1}' | grep -E '^upstream/(main$|stable/|releng/)'); do
+          for ref in $ALL_BRANCHES; do
             branch_path=${ref#upstream/}                  
             safe_name=$(echo "$branch_path" | tr '/' '-')   
 
@@ -48,41 +14,55 @@ jobs:
 
             git fetch origin --prune
 
-            UPSTREAM_TIP=$(git rev-parse refs/remotes/upstream/$branch_path)
+            UPSTREAM_TIP=$(git rev-parse refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
             ORIGIN_UPSTREAM_TIP=$(git rev-parse refs/remotes/origin/upstream/$safe_name 2>/dev/null || echo "")
+
+            if [ -z "$UPSTREAM_TIP" ]; then continue; fi
 
             SYNC_COMPLETE=true
 
             # -----------------------------------------------------------------
-            # STATE 1: INITIALIZATION & INCREMENTAL BACKFILL GATE
+            # STATE 1: INITIALIZATION & ADAPTIVE BACKFILL GATE
             # -----------------------------------------------------------------
             if [ "$ORIGIN_UPSTREAM_TIP" != "$UPSTREAM_TIP" ]; then
-              echo "Branch 'upstream/$safe_name' is missing or behind upstream. Verifying timeline..."
+              echo "Branch 'upstream/$safe_name' is missing or behind. Verifying timeline..."
 
               CURRENT_YEAR=$(date +%Y)
               
-              # Loop through years, and then quarterly months
               for year in $(seq 1993 $CURRENT_YEAR); do
-                for month in "01" "04" "07" "10"; do
+                # 1. Attempt Monthly Chunks
+                for month in $(seq -w 1 12); do
                   EPOCH_DATE="${year}-${month}-01"
                   TARGET_HASH=$(git log -1 --format="%H" --until="$EPOCH_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
 
-                  if [ -n "$TARGET_HASH" ]; then
-                    if ! git branch -r --contains "$TARGET_HASH" | grep -q "origin/upstream/$safe_name"; then
-                      echo "Backfilling historical chunk for $EPOCH_DATE ($TARGET_HASH)..."
+                  if [ -n "$TARGET_HASH" ] && ! git branch -r --contains "$TARGET_HASH" | grep -q "origin/upstream/$safe_name"; then
+                    echo "Pushing monthly chunk: $EPOCH_DATE ($TARGET_HASH)..."
+                    
+                    if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
+                      echo "Monthly threshold reached. Subdividing $year-$month into 10-day increments..."
                       
-                      if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
-                        echo "::warning::Network threshold reached during $EPOCH_DATE backfill for $safe_name. Halting backfill for this run."
-                        SYNC_COMPLETE=false
-                        break 2 # Breaks out of both month and year loops safely
-                      fi
+                      # 2. Fallback to 10-Day Sub-Chunks
+                      for day in "10" "20" "28"; do
+                        SUB_DATE="${year}-${month}-${day}"
+                        SUB_HASH=$(git log -1 --format="%H" --until="$SUB_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
+                        
+                        if [ -n "$SUB_HASH" ] && ! git branch -r --contains "$SUB_HASH" | grep -q "origin/upstream/$safe_name"; then
+                          echo "Pushing 10-day sub-chunk: $SUB_DATE..."
+                          
+                          if ! git push origin ${SUB_HASH}:refs/heads/upstream/$safe_name; then
+                            echo "::warning::Hard network threshold reached on $SUB_DATE. Halting backfill for $safe_name."
+                            SYNC_COMPLETE=false
+                            break 3 # Escapes day, month, and year loops safely
+                          fi
+                        fi
+                      done
                     fi
                   fi
                 done
               done
 
               if [ "$SYNC_COMPLETE" = true ]; then
-                echo "Pushing final tip ($UPSTREAM_TIP) to origin/upstream/$safe_name..."
+                echo "Pushing final tip ($UPSTREAM_TIP)..."
                 if ! git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease; then
                   echo "::warning::Failed to push tip for $safe_name. Will retry on next schedule."
                   SYNC_COMPLETE=false
@@ -104,23 +84,19 @@ jobs:
 
             git checkout -B downstream/staging-$safe_name refs/remotes/upstream/$branch_path
 
-            # Retrieve all shim branches in numbered order
             SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/middleware/shim-[0-9]{2}-' | sort)
 
             if [ -n "$SHIM_BRANCHES" ]; then
               for SHIM in $SHIM_BRANCHES; do
                 echo "Extracting tools from $SHIM..."
                 
-                # Extract only the tooling directory from the shim branch
                 if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
                   cp -r shim-tools /tmp/
                   
-                  # Wipe the script files from the Git tracking tree
                   git reset HEAD shim-tools/
                   rm -rf shim-tools/
                   git checkout -- .
                   
-                  # Execute the master script against the clean source tree
                   chmod +x /tmp/shim-tools/master.sh
                   if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
                     git add .
