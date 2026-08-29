@@ -33,7 +33,6 @@ jobs:
           git config --global http.version HTTP/1.1
           echo "GH_TOKEN=${{ secrets.PAT_TOKEN }}" >> $GITHUB_ENV
 
-          # Dynamically set GH_REPO to ensure gh CLI targets the downstream repo, not upstream freebsd-src
           ORIGIN_URL=$(git remote get-url origin)
           REPO_NAME=$(echo "$ORIGIN_URL" | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?.*|\1|')
           echo "GH_REPO=$REPO_NAME" >> $GITHUB_ENV
@@ -53,7 +52,6 @@ jobs:
           OTHER_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^upstream/(stable/|releng/)' | sort -rV)
           ALL_BRANCHES="upstream/main $OTHER_BRANCHES"
 
-          # 1. Update latest/upstream to the absolute tip of upstream/main
           PRIMARY_UPSTREAM="upstream/main"
           PRIMARY_TIP=$(git rev-parse refs/remotes/$PRIMARY_UPSTREAM 2>/dev/null || echo "")
           
@@ -66,10 +64,8 @@ jobs:
             git push origin "us-latest" --force
           fi
 
-          # Fetch and numerically sort all shim branches
           SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/midstream/shim-[0-9]{2}-' | sort)
 
-          # 2. Build latest/midstream: Aggregate all shim tools side-by-side without overwriting
           if [ -n "$PRIMARY_TIP" ]; then
             echo "Building latest/midstream..."
             git checkout -B latest/midstream $PRIMARY_TIP
@@ -99,7 +95,6 @@ jobs:
             git tag -f "ms-latest" $MIDSTREAM_TIP
             git push origin "ms-latest" --force
 
-            # 3. Update latest/downstream with the fully built latest result
             echo "Updating latest/downstream..."
             git checkout -B latest/downstream $PRIMARY_TIP
             git checkout latest/midstream -- shim-tools/
@@ -125,41 +120,33 @@ jobs:
             Shims Applied:$APPLIED_SHIMS" $DOWNSTREAM_TIP --force
             git push origin "ds-latest" --force
 
-            # Generate the pull-release helper script
-            cat << 'EOF' > pull-release.sh
-#!/usr/bin/env bash
-set -e
-
-TAG="${1:-ds-latest}"
-DEST="${2:-freebsd-release-$TAG}"
-KEEP_GIT=false
-
-shift || true
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --keep-git) KEEP_GIT=true ;;
-        *) DEST="$1" ;;
-    esac
-    shift
-done
-
-ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/wsad-io-technologies-inc/FreeBSD-Stable-Tracking.git")
-echo "Pulling release tag/branch '$TAG' into '$DEST'..."
-
-git clone --depth 1 --branch "$TAG" "$ORIGIN_URL" "$DEST"
-
-if [ "$KEEP_GIT" = false ]; then
-    echo "Cleaning up git metadata..."
-    rm -rf "$DEST/.git"
-    echo "Done! Clean source tree ready in '$DEST'."
-else
-    echo "Done! Cloned with git metadata preserved in '$DEST'."
-fi
-EOF
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'set -e' \
+              'TAG="${1:-ds-latest}"' \
+              'DEST="${2:-freebsd-release-$TAG}"' \
+              'KEEP_GIT=false' \
+              'shift || true' \
+              'while [[ "$#" -gt 0 ]]; do' \
+              '    case $1 in' \
+              '        --keep-git) KEEP_GIT=true ;;' \
+              '        *) DEST="$1" ;;' \
+              '    esac' \
+              '    shift' \
+              'done' \
+              'ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/wsad-io-technologies-inc/FreeBSD-Stable-Tracking.git")' \
+              'echo "Pulling release tag/branch '\''$TAG'\'' into '\''$DEST'\''..."' \
+              'git clone --depth 1 --branch "$TAG" "$ORIGIN_URL" "$DEST"' \
+              'if [ "$KEEP_GIT" = false ]; then' \
+              '    echo "Cleaning up git metadata..."' \
+              '    rm -rf "$DEST/.git"' \
+              '    echo "Done! Clean source tree ready in '\''$DEST'\''."' \
+              'else' \
+              '    echo "Done! Cloned with git metadata preserved in '\''$DEST'\''."' \
+              'fi' > pull-release.sh
             chmod +x pull-release.sh
 
-            RELEASE_NOTES=$(cat <<EOF
-### Downstream Latest Release
+            RELEASE_NOTES="### Downstream Latest Release
 - **Upstream Tip:** \`$PRIMARY_TIP\`
 - **Downstream Tip:** \`$DOWNSTREAM_TIP\`
 - **Shims Applied:** \`$APPLIED_SHIMS\`
@@ -167,9 +154,7 @@ EOF
 To pull this release without full repository history, use the included \`pull-release.sh\` script:
 \`\`\`bash
 ./pull-release.sh ds-latest my-source-folder
-\`\`\`
-EOF
-)
+\`\`\`"
 
             if gh release view "ds-latest" &>/dev/null; then
               gh release delete "ds-latest" --yes --cleanup-tag || true
@@ -182,7 +167,6 @@ EOF
             rm -f pull-release.sh
           fi
 
-          # 4. Process versioned upstream tags for release tags & packages
           UPSTREAM_TAGS=$(git tag -l | grep -E '.*-RELEASE$' | tail -n 15)
           for tag in $UPSTREAM_TAGS; do
             safe_tag_id=$(echo "$tag" | tr '/' '-')
@@ -218,43 +202,39 @@ EOF
             Shims Applied:$APPLIED_SHIMS" "$REL_DOWNSTREAM_TIP" --force
             git push origin "ds-$safe_tag_id" --force
 
-            cat << 'EOF' > pull-release.sh
-#!/usr/bin/env bash
-set -e
-TAG="${1:-ds-latest}"
-DEST="${2:-freebsd-release-$TAG}"
-KEEP_GIT=false
-shift || true
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --keep-git) KEEP_GIT=true ;;
-        *) DEST="$1" ;;
-    esac
-    shift
-done
-ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/wsad-io-technologies-inc/FreeBSD-Stable-Tracking.git")
-echo "Pulling release tag/branch '$TAG' into '$DEST'..."
-git clone --depth 1 --branch "$TAG" "$ORIGIN_URL" "$DEST"
-if [ "$KEEP_GIT" = false ]; then
-    rm -rf "$DEST/.git"
-    echo "Done! Clean source tree ready in '$DEST'."
-else
-    echo "Done! Cloned with git metadata preserved in '$DEST'."
-fi
-EOF
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'set -e' \
+              'TAG="${1:-ds-latest}"' \
+              'DEST="${2:-freebsd-release-$TAG}"' \
+              'KEEP_GIT=false' \
+              'shift || true' \
+              'while [[ "$#" -gt 0 ]]; do' \
+              '    case $1 in' \
+              '        --keep-git) KEEP_GIT=true ;;' \
+              '        *) DEST="$1" ;;' \
+              '    esac' \
+              '    shift' \
+              'done' \
+              'ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/wsad-io-technologies-inc/FreeBSD-Stable-Tracking.git")' \
+              'echo "Pulling release tag/branch '\''$TAG'\'' into '\''$DEST'\''..."' \
+              'git clone --depth 1 --branch "$TAG" "$ORIGIN_URL" "$DEST"' \
+              'if [ "$KEEP_GIT" = false ]; then' \
+              '    rm -rf "$DEST/.git"' \
+              '    echo "Done! Clean source tree ready in '\''$DEST'\''."' \
+              'else' \
+              '    echo "Done! Cloned with git metadata preserved in '\''$DEST'\''."' \
+              'fi' > pull-release.sh
             chmod +x pull-release.sh
 
-            TAG_RELEASE_NOTES=$(cat <<EOF
-### Downstream Release: $tag
+            TAG_RELEASE_NOTES="### Downstream Release: $tag
 - **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
 - **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`
 
 Pull this release using:
 \`\`\`bash
 ./pull-release.sh ds-$safe_tag_id
-\`\`\`
-EOF
-)
+\`\`\`"
 
             if gh release view "ds-$safe_tag_id" &>/dev/null; then
               gh release delete "ds-$safe_tag_id" --yes --cleanup-tag || true
@@ -267,7 +247,6 @@ EOF
             rm -f pull-release.sh
           done
 
-          # 5. Process all individual branches for staging
           for ref in $ALL_BRANCHES; do
             branch_path=${ref#upstream/}                 
             safe_name=$(echo "$branch_path" | tr '/' '-')    
