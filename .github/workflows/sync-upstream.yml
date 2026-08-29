@@ -391,3 +391,4 @@ EOF
               git push origin $UPSTREAM_TIP:refs/heads/upstream/$safe_name --force-with-lease || true
             fi
           done
+
