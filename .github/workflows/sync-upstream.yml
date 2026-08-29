@@ -58,8 +58,8 @@ jobs:
             git push origin "us-latest" --force
           fi
 
-          # Fetch and numerically sort all shim branches (e.g., shim-00, shim-01...)
-          SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/middleware/shim-[0-9]{2}-' | sort)
+          # Fetch and numerically sort all shim branches using the correct midstream prefix
+          SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/midstream/shim-[0-9]{2}-' | sort)
 
           # 2. Build latest/midstream (combined shims applied sequentially on top of upstream tip)
           if [ -n "$PRIMARY_TIP" ]; then
@@ -106,7 +106,7 @@ jobs:
             Shims Applied:$APPLIED_SHIMS" $DOWNSTREAM_TIP --force
             git push origin "ds-latest" --force
 
-            # Package and publish latest release zip via GitHub CLI
+            # Package and publish latest release zip via GitHub CLI with --target flag
             git archive --format=zip HEAD -o downstream-latest.zip
             RELEASE_NOTES="### Downstream Latest Release
             - **Upstream Tip:** \`$PRIMARY_TIP\`
@@ -118,7 +118,8 @@ jobs:
             fi
             gh release create "ds-latest" downstream-latest.zip \
               --title "Downstream Latest Release" \
-              --notes "$RELEASE_NOTES"
+              --notes "$RELEASE_NOTES" \
+              --target "$DOWNSTREAM_TIP"
           fi
 
           # 4. Process versioned upstream tags for release tags & packages
@@ -168,7 +169,7 @@ jobs:
             Shims Applied:$TAG_APPLIED_SHIMS" "$REL_MIDSTREAM_TIP" --force
             git push origin "ds-$safe_tag_id" --force
 
-            # Package source archive and publish GitHub Release
+            # Package source archive and publish GitHub Release with --target flag
             git archive --format=zip HEAD -o downstream-$safe_tag_id.zip
             TAG_RELEASE_NOTES="### Downstream Release: $tag
             - **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
@@ -180,7 +181,8 @@ jobs:
             fi
             gh release create "ds-$safe_tag_id" downstream-$safe_tag_id.zip \
               --title "Downstream Release $tag" \
-              --notes "$TAG_RELEASE_NOTES"
+              --notes "$TAG_RELEASE_NOTES" \
+              --target "$REL_MIDSTREAM_TIP"
           done
 
           # 5. Process all individual branches for staging
@@ -279,7 +281,6 @@ jobs:
 
                 if [ -z "$TARGET_HASH" ]; then continue; fi
                 
-                # Corrected variable spelling bug here: ORIGIN_UPSTREAM_TIP
                 if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
                   continue
                 fi
