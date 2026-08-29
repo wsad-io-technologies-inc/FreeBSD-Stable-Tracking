@@ -228,13 +228,13 @@ jobs:
             chmod +x pull-release.sh
 
             TAG_RELEASE_NOTES="### Downstream Release: $tag
-- **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
-- **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`
+            - **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
+            - **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`
 
-Pull this release using:
-\`\`\`bash
-./pull-release.sh ds-$safe_tag_id
-\`\`\`"
+            Pull this release using:
+            \`\`\`bash
+            ./pull-release.sh ds-$safe_tag_id
+            \`\`\`"
 
             if gh release view "ds-$safe_tag_id" &>/dev/null; then
               gh release delete "ds-$safe_tag_id" --yes --cleanup-tag || true
