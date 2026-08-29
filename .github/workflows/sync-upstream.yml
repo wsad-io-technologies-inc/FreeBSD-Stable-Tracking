@@ -58,34 +58,34 @@ jobs:
             git push origin "us-latest" --force
           fi
 
-          # Fetch and numerically sort all shim branches (e.g., shim-00, shim-01...)
-          SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/middleware/shim-[0-9]{2}-' | sort)
+          # Fetch and numerically sort all shim branches
+          SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/midstream/shim-[0-9]{2}-' | sort)
 
-          # 2. Build latest/midstream (combined shims applied sequentially on top of upstream tip)
+          # 2. Build latest/midstream: Aggregate all shim tools side-by-side without overwriting
           if [ -n "$PRIMARY_TIP" ]; then
             echo "Building latest/midstream..."
             git checkout -B latest/midstream $PRIMARY_TIP
+            mkdir -p shim-tools
 
             APPLIED_SHIMS=""
             if [ -n "$SHIM_BRANCHES" ]; then
               for SHIM in $SHIM_BRANCHES; do
-                if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
-                  cp -r shim-tools /tmp/
-                  git reset HEAD shim-tools/
-                  rm -rf shim-tools/
-                  git checkout -- .
-                  
-                  chmod +x /tmp/shim-tools/master.sh
-                  if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
-                    git add .
-                    git commit -m "Applied automated shim modifications from $SHIM" || true
-                    APPLIED_SHIMS="$APPLIED_SHIMS $SHIM"
-                  fi
-                  rm -rf /tmp/shim-tools
+                SHIM_NAME=$(basename "$SHIM")
+                echo "Collecting tools from $SHIM into shim-tools/$SHIM_NAME..."
+                
+                mkdir -p "/tmp/shim-src"
+                git worktree add /tmp/shim-src "$SHIM"
+                if [ -d "/tmp/shim-src/shim-tools" ]; then
+                  mkdir -p "shim-tools/$SHIM_NAME"
+                  cp -r /tmp/shim-src/shim-tools/* "shim-tools/$SHIM_NAME/"
+                  APPLIED_SHIMS="$APPLIED_SHIMS $SHIM"
                 fi
+                git worktree remove /tmp/shim-src --force || true
               done
             fi
 
+            git add shim-tools/
+            git commit -m "Aggregate shim tools into latest/midstream" || true
             git push origin latest/midstream --force-with-lease
             
             MIDSTREAM_TIP=$(git rev-parse HEAD)
@@ -94,19 +94,30 @@ jobs:
 
             # 3. Update latest/downstream with the fully built latest result
             echo "Updating latest/downstream..."
-            git checkout -B latest/downstream latest/midstream
+            git checkout -B latest/downstream $PRIMARY_TIP
+            git checkout latest/midstream -- shim-tools/
+            
+            for tool_dir in $(find shim-tools -mindepth 1 -maxdepth 1 -type d | sort); do
+              if [ -f "$tool_dir/master.sh" ]; then
+                echo "Running $tool_dir/master.sh..."
+                chmod +x "$tool_dir/master.sh"
+                "$tool_dir/master.sh" "$PWD" "YourOSName"
+              fi
+            done
+
+            git rm -rf shim-tools/
+            git add .
+            git commit -m "Apply automated shim tools and strip tools for downstream" || true
             git push origin latest/downstream --force-with-lease
             
             DOWNSTREAM_TIP=$(git rev-parse HEAD)
             
-            # Create annotated tag tracking upstream commit, downstream commit, and applied shims
             git tag -a "ds-latest" -m "Downstream Latest Build
             Upstream Commit: $PRIMARY_TIP
             Downstream Commit: $DOWNSTREAM_TIP
             Shims Applied:$APPLIED_SHIMS" $DOWNSTREAM_TIP --force
             git push origin "ds-latest" --force
 
-            # Package and publish latest release zip via GitHub CLI
             git archive --format=zip HEAD -o downstream-latest.zip
             RELEASE_NOTES="### Downstream Latest Release
             - **Upstream Tip:** \`$PRIMARY_TIP\`
@@ -118,7 +129,8 @@ jobs:
             fi
             gh release create "ds-latest" downstream-latest.zip \
               --title "Downstream Latest Release" \
-              --notes "$RELEASE_NOTES"
+              --notes "$RELEASE_NOTES" \
+              --target "$DOWNSTREAM_TIP"
           fi
 
           # 4. Process versioned upstream tags for release tags & packages
@@ -130,57 +142,45 @@ jobs:
             TAG_COMMIT=$(git rev-parse "$tag" 2>/dev/null || echo "")
             if [ -z "$TAG_COMMIT" ]; then continue; fi
 
-            # us-<tag>
             git tag -f "us-$safe_tag_id" "$TAG_COMMIT"
             git push origin "us-$safe_tag_id" --force
 
-            # Build midstream/downstream for this tagged commit
             git checkout -B temp-release-$safe_tag_id "$TAG_COMMIT"
-            
-            TAG_APPLIED_SHIMS=""
-            if [ -n "$SHIM_BRANCHES" ]; then
-              for SHIM in $SHIM_BRANCHES; do
-                if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
-                  cp -r shim-tools /tmp/
-                  git reset HEAD shim-tools/
-                  rm -rf shim-tools/
-                  git checkout -- .
-                  
-                  chmod +x /tmp/shim-tools/master.sh
-                  if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
-                    git add .
-                    git commit -m "Applied automated shim modifications from $SHIM for $tag" || true
-                    TAG_APPLIED_SHIMS="$TAG_APPLIED_SHIMS $SHIM"
-                  fi
-                  rm -rf /tmp/shim-tools
-                fi
-              done
-            fi
+            git checkout latest/midstream -- shim-tools/
 
-            REL_MIDSTREAM_TIP=$(git rev-parse HEAD)
-            git tag -f "ms-$safe_tag_id" "$REL_MIDSTREAM_TIP"
+            for tool_dir in $(find shim-tools -mindepth 1 -maxdepth 1 -type d | sort); do
+              if [ -f "$tool_dir/master.sh" ]; then
+                chmod +x "$tool_dir/master.sh"
+                "$tool_dir/master.sh" "$PWD" "YourOSName"
+              fi
+            done
+
+            git rm -rf shim-tools/
+            git add .
+            git commit -m "Applied automated shim modifications for $tag" || true
+
+            REL_DOWNSTREAM_TIP=$(git rev-parse HEAD)
+            git tag -f "ms-$safe_tag_id" "$REL_DOWNSTREAM_TIP"
             git push origin "ms-$safe_tag_id" --force
 
-            # Create annotated tag linking exact release provenance
             git tag -a "ds-$safe_tag_id" -m "Downstream Release for $tag
             Upstream Tag/Commit: $tag ($TAG_COMMIT)
-            Downstream Commit: $REL_MIDSTREAM_TIP
-            Shims Applied:$TAG_APPLIED_SHIMS" "$REL_MIDSTREAM_TIP" --force
+            Downstream Commit: $REL_DOWNSTREAM_TIP
+            Shims Applied:$APPLIED_SHIMS" "$REL_DOWNSTREAM_TIP" --force
             git push origin "ds-$safe_tag_id" --force
 
-            # Package source archive and publish GitHub Release
             git archive --format=zip HEAD -o downstream-$safe_tag_id.zip
             TAG_RELEASE_NOTES="### Downstream Release: $tag
             - **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
-            - **Downstream Commit:** \`$REL_MIDSTREAM_TIP\`
-            - **Shims Applied:** \`$TAG_APPLIED_SHIMS\`"
+            - **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`"
 
             if gh release view "ds-$safe_tag_id" &>/dev/null; then
               gh release delete "ds-$safe_tag_id" --yes --cleanup-tag || true
             fi
             gh release create "ds-$safe_tag_id" downstream-$safe_tag_id.zip \
               --title "Downstream Release $tag" \
-              --notes "$TAG_RELEASE_NOTES"
+              --notes "$TAG_RELEASE_NOTES" \
+              --target "$REL_DOWNSTREAM_TIP"
           done
 
           # 5. Process all individual branches for staging
@@ -194,25 +194,18 @@ jobs:
             if [ -z "$UPSTREAM_TIP" ]; then continue; fi
 
             git checkout -B downstream/staging-$safe_name $UPSTREAM_TIP
+            git checkout latest/midstream -- shim-tools/
 
-            if [ -n "$SHIM_BRANCHES" ]; then
-              for SHIM in $SHIM_BRANCHES; do
-                if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
-                  cp -r shim-tools /tmp/
-                  git reset HEAD shim-tools/
-                  rm -rf shim-tools/
-                  git checkout -- .
-                  
-                  chmod +x /tmp/shim-tools/master.sh
-                  if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
-                    git add .
-                    git commit -m "Applied automated shim modifications from $SHIM" || true
-                  fi
-                  rm -rf /tmp/shim-tools
-                fi
-              done
-            fi
+            for tool_dir in $(find shim-tools -mindepth 1 -maxdepth 1 -type d | sort); do
+              if [ -f "$tool_dir/master.sh" ]; then
+                chmod +x "$tool_dir/master.sh"
+                "$tool_dir/master.sh" "$PWD" "YourOSName"
+              fi
+            done
 
+            git rm -rf shim-tools/
+            git add .
+            git commit -m "Applied automated shim modifications for $branch_path" || true
             git push origin downstream/staging-$safe_name --force-with-lease
           done
 
@@ -279,7 +272,6 @@ jobs:
 
                 if [ -z "$TARGET_HASH" ]; then continue; fi
                 
-                # Corrected variable spelling bug here: ORIGIN_UPSTREAM_TIP
                 if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
                   continue
                 fi
