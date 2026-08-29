@@ -26,7 +26,6 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Maximize compression and buffer size for heavy object packfiles
           git config --global core.compression 9
           git config --global http.postBuffer 1073741824
           git config --global http.version HTTP/1.1
@@ -38,7 +37,6 @@ jobs:
 
       - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
-          # Prioritize main first, then reverse-version sort the rest (newest to oldest)
           OTHER_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^upstream/(stable/|releng/)' | sort -rV)
           ALL_BRANCHES="upstream/main $OTHER_BRANCHES"
 
@@ -59,42 +57,45 @@ jobs:
 
             SYNC_COMPLETE=true
 
-            # -----------------------------------------------------------------
-            # STATE 1: INITIALIZATION & ADAPTIVE BACKFILL GATE
-            # -----------------------------------------------------------------
             if [ "$ORIGIN_UPSTREAM_TIP" != "$UPSTREAM_TIP" ]; then
               echo "Branch 'upstream/$safe_name' is missing or behind. Verifying timeline..."
 
               CURRENT_YEAR=$(date +%Y)
               
               for year in $(seq 1993 $CURRENT_YEAR); do
-                # 1. Attempt Monthly Chunks
                 for month in $(seq -w 1 12); do
                   EPOCH_DATE="${year}-${month}-01"
                   TARGET_HASH=$(git log -1 --format="%H" --until="$EPOCH_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
 
-                  if [ -n "$TARGET_HASH" ] && ! git branch -r --contains "$TARGET_HASH" | grep -q "origin/upstream/$safe_name"; then
-                    echo "Pushing monthly chunk: $EPOCH_DATE ($TARGET_HASH)..."
+                  if [ -z "$TARGET_HASH" ]; then continue; fi
+                  
+                  # STRICT ANCESTOR CHECK: Skip if the remote is already ahead of this chunk
+                  if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
+                    continue
+                  fi
+
+                  echo "Pushing monthly chunk: $EPOCH_DATE ($TARGET_HASH)..."
+                  
+                  if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
+                    echo "Monthly threshold reached. Subdividing $year-$month into 10-day increments..."
                     
-                    if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
-                      echo "Monthly threshold reached. Subdividing $year-$month into 10-day increments..."
+                    for day in "10" "20" "28"; do
+                      SUB_DATE="${year}-${month}-${day}"
+                      SUB_HASH=$(git log -1 --format="%H" --until="$SUB_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
                       
-                      # 2. Fallback to 10-Day Sub-Chunks
-                      for day in "10" "20" "28"; do
-                        SUB_DATE="${year}-${month}-${day}"
-                        SUB_HASH=$(git log -1 --format="%H" --until="$SUB_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
+                      if [ -z "$SUB_HASH" ]; then continue; fi
+                      
+                      if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$SUB_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
+                        continue
+                      fi
                         
-                        if [ -n "$SUB_HASH" ] && ! git branch -r --contains "$SUB_HASH" | grep -q "origin/upstream/$safe_name"; then
-                          echo "Pushing 10-day sub-chunk: $SUB_DATE..."
-                          
-                          if ! git push origin ${SUB_HASH}:refs/heads/upstream/$safe_name; then
-                            echo "::warning::Hard network threshold reached on $SUB_DATE. Halting backfill for $safe_name."
-                            SYNC_COMPLETE=false
-                            break 3 # Escapes day, month, and year loops safely
-                          fi
-                        fi
-                      done
-                    fi
+                      echo "Pushing 10-day sub-chunk: $SUB_DATE..."
+                      if ! git push origin ${SUB_HASH}:refs/heads/upstream/$safe_name; then
+                        echo "::warning::Hard network threshold reached on $SUB_DATE. Halting backfill for $safe_name."
+                        SYNC_COMPLETE=false
+                        break 3
+                      fi
+                    done
                   fi
                 done
               done
@@ -115,9 +116,6 @@ jobs:
               continue
             fi
 
-            # -----------------------------------------------------------------
-            # STATE 2: SEQUENTIAL SHIM OVERLAY & DOWNSTREAM STAGING BUILD
-            # -----------------------------------------------------------------
             echo "Building downstream staging for $safe_name..."
 
             git checkout -B downstream/staging-$safe_name refs/remotes/upstream/$branch_path
