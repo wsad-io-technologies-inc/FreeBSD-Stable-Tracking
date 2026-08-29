@@ -387,7 +387,7 @@ EOF
             done
 
             if [ "$SYNC_COMPLETE" = true ]; then
-              echo "Pushing final tip..."
+              echo "Pushing final Linux/Unix tip..."
               git push origin $UPSTREAM_TIP:refs/heads/upstream/$safe_name --force-with-lease || true
             fi
           done
