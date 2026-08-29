@@ -146,12 +146,233 @@ jobs:
               'fi' > pull-release.sh
             chmod +x pull-release.sh
 
-            RELEASE_NOTES=$(cat << 'EOF'
-            ### Downstream Latest Release
-            - **Upstream Tip:** `$PRIMARY_TIP`
-            - **Downstream Tip:** `$DOWNSTREAM_TIP`
-            - **Shims Applied:** `$APPLIED_SHIMS`
+            RELEASE_NOTES=$(cat << EOF
+### Downstream Latest Release
+- **Upstream Tip:** \`$PRIMARY_TIP\`
+- **Downstream Tip:** \`$DOWNSTREAM_TIP\`
+- **Shims Applied:** \`$APPLIED_SHIMS\`
 
-            To pull this release without full repository history, use the included `pull-release.sh` script:
-            ```bash
-            ./pull-release.sh ds-latest my-source-folder
+To pull this release without full repository history, use the included \`pull-release.sh\` script:
+\`\`\`bash
+./pull-release.sh ds-latest my-source-folder
+\`\`\`
+EOF
+)
+
+            if gh release view "ds-latest" &>/dev/null; then
+              gh release delete "ds-latest" --yes --cleanup-tag || true
+            fi
+            gh release create "ds-latest" pull-release.sh \
+              --title "Downstream Latest Release" \
+              --notes "$RELEASE_NOTES" \
+              --target "$DOWNSTREAM_TIP"
+
+            rm -f pull-release.sh
+          fi
+
+          UPSTREAM_TAGS=$(git tag -l | grep -E '.*-RELEASE$' | tail -n 15)
+          for tag in $UPSTREAM_TAGS; do
+            safe_tag_id=$(echo "$tag" | tr '/' '-')
+            echo "Processing versioned release tag: $tag ($safe_tag_id)"
+
+            TAG_COMMIT=$(git rev-parse "$tag" 2>/dev/null || echo "")
+            if [ -z "$TAG_COMMIT" ]; then continue; fi
+
+            git tag -f "us-$safe_tag_id" "$TAG_COMMIT"
+            git push origin "us-$safe_tag_id" --force
+
+            git checkout -B temp-release-$safe_tag_id "$TAG_COMMIT"
+            git checkout latest/midstream -- shim-tools/
+
+            for tool_dir in $(find shim-tools -mindepth 1 -maxdepth 1 -type d | sort); do
+              if [ -f "$tool_dir/master.sh" ]; then
+                chmod +x "$tool_dir/master.sh"
+                "$tool_dir/master.sh" "$PWD" "YourOSName"
+              fi
+            done
+
+            git rm -rf shim-tools/
+            git add .
+            git commit -m "Applied automated shim modifications for $tag" || true
+
+            REL_DOWNSTREAM_TIP=$(git rev-parse HEAD)
+            git tag -f "ms-$safe_tag_id" "$REL_DOWNSTREAM_TIP"
+            git push origin "ms-$safe_tag_id" --force
+
+            git tag -a "ds-$safe_tag_id" -m "Downstream Release for $tag
+            Upstream Tag/Commit: $tag ($TAG_COMMIT)
+            Downstream Commit: $REL_DOWNSTREAM_TIP
+            Shims Applied:$APPLIED_SHIMS" "$REL_DOWNSTREAM_TIP" --force
+            git push origin "ds-$safe_tag_id" --force
+
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'set -e' \
+              'TAG="${1:-ds-latest}"' \
+              'DEST="${2:-freebsd-release-$TAG}"' \
+              'KEEP_GIT=false' \
+              'shift || true' \
+              'while [[ "$#" -gt 0 ]]; do' \
+              '    case $1 in' \
+              '        --keep-git) KEEP_GIT=true ;;' \
+              '        *) DEST="$1" ;;' \
+              '    esac' \
+              '    shift' \
+              'done' \
+              'ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/wsad-io-technologies-inc/FreeBSD-Stable-Tracking.git")' \
+              'echo "Pulling release tag/branch '\''$TAG'\'' into '\''$DEST'\''..."' \
+              'git clone --depth 1 --branch "$TAG" "$ORIGIN_URL" "$DEST"' \
+              'if [ "$KEEP_GIT" = false ]; then' \
+              '    rm -rf "$DEST/.git"' \
+              '    echo "Done! Clean source tree ready in '\''$DEST'\''."' \
+              'else' \
+              '    echo "Done! Cloned with git metadata preserved in '\''$DEST'\''."' \
+              'fi' > pull-release.sh
+            chmod +x pull-release.sh
+
+            TAG_RELEASE_NOTES=$(cat << EOF
+### Downstream Release: $tag
+- **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
+- **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`
+
+Pull this release using:
+\`\`\`bash
+./pull-release.sh ds-$safe_tag_id
+\`\`\`
+EOF
+)
+
+            if gh release view "ds-$safe_tag_id" &>/dev/null; then
+              gh release delete "ds-$safe_tag_id" --yes --cleanup-tag || true
+            fi
+            gh release create "ds-$safe_tag_id" pull-release.sh \
+              --title "Downstream Release $tag" \
+              --notes "$TAG_RELEASE_NOTES" \
+              --target "$REL_DOWNSTREAM_TIP"
+
+            rm -f pull-release.sh
+          done
+
+          for ref in $ALL_BRANCHES; do
+            branch_path=${ref#upstream/}                 
+            safe_name=$(echo "$branch_path" | tr '/' '-')    
+
+            echo "Building downstream staging for latest $safe_name..."
+
+            UPSTREAM_TIP=$(git rev-parse refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
+            if [ -z "$UPSTREAM_TIP" ]; then continue; fi
+
+            git checkout -B downstream/staging-$safe_name $UPSTREAM_TIP
+            git checkout latest/midstream -- shim-tools/
+
+            for tool_dir in $(find shim-tools -mindepth 1 -maxdepth 1 -type d | sort); do
+              if [ -f "$tool_dir/master.sh" ]; then
+                chmod +x "$tool_dir/master.sh"
+                "$tool_dir/master.sh" "$PWD" "YourOSName"
+              fi
+            done
+
+            git rm -rf shim-tools/
+            git add .
+            git commit -m "Applied automated shim modifications for $branch_path" || true
+            git push origin downstream/staging-$safe_name --force-with-lease
+          done
+
+  # ============================================================================
+  # AGENT 2: SLOW LANE (Methodically Backfills Upstream History in Chunks)
+  # ============================================================================
+  backfill-upstream-history:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Configure Git Identity & Network Tuning
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global core.compression 9
+          git config --global http.postBuffer 1073741824
+          git config --global http.version HTTP/1.1
+
+      - name: Add FreeBSD Upstream Remote & Fetch
+        run: |
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/freebsd/freebsd-src.git
+          fi
+          git fetch upstream --prune --tags
+
+      - name: Dynamically Sync Upstream History
+        run: |
+          git fetch origin --prune
+          
+          OTHER_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^upstream/(stable/|releng/)' | sort -rV)
+          ALL_BRANCHES="upstream/main $OTHER_BRANCHES"
+
+          for ref in $ALL_BRANCHES; do
+            branch_path=${ref#upstream/}                 
+            safe_name=$(echo "$branch_path" | tr '/' '-')    
+
+            echo "Processing upstream backfill: $branch_path"
+
+            UPSTREAM_TIP=$(git rev-parse refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
+            ORIGIN_UPSTREAM_TIP=$(git rev-parse refs/remotes/origin/upstream/$safe_name 2>/dev/null || echo "")
+
+            if [ -z "$UPSTREAM_TIP" ] || [ "$ORIGIN_UPSTREAM_TIP" = "$UPSTREAM_TIP" ]; then 
+              echo "Branch is up to date or empty. Skipping."
+              continue 
+            fi
+
+            START_YEAR=1993
+            if [ -n "$ORIGIN_UPSTREAM_TIP" ]; then
+              START_YEAR=$(git show -s --format=%cd --date=format:%Y $ORIGIN_UPSTREAM_TIP 2>/dev/null || echo 1993)
+            fi
+            
+            CURRENT_YEAR=$(date +%Y)
+            SYNC_COMPLETE=true
+            
+            for year in $(seq $START_YEAR $CURRENT_YEAR); do
+              for month in $(seq -w 1 12); do
+                EPOCH_DATE="${year}-${month}-01"
+                TARGET_HASH=$(git log -1 --format="%H" --until="$EPOCH_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
+
+                if [ -z "$TARGET_HASH" ]; then continue; fi
+                
+                if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
+                  continue
+                fi
+
+                echo "Pushing monthly chunk: $EPOCH_DATE ($TARGET_HASH)..."
+                
+                if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
+                  echo "Network threshold hit. Falling back to sub-chunks..."
+                  for day in "10" "20" "28"; do
+                    SUB_DATE="${year}-${month}-${day}"
+                    SUB_HASH=$(git log -1 --format="%H" --until="$SUB_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
+                    
+                    if [ -z "$SUB_HASH" ]; then continue; fi
+                    
+                    if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$SUB_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
+                      continue
+                    fi
+                    
+                    if ! git push origin ${SUB_HASH}:refs/heads/upstream/$safe_name; then
+                      echo "::warning::Hard threshold hit on $SUB_DATE. Halting backfill for $safe_name."
+                      SYNC_COMPLETE=false
+                      break 3
+                    fi
+                  done
+                fi
+              done
+            done
+
+            if [ "$SYNC_COMPLETE" = true ]; then
+              echo "Pushing final Linux/Unix tip..."
+              git push origin $UPSTREAM_TIP:refs/heads/upstream/$safe_name --force-with-lease || true
+            fi
+          done
