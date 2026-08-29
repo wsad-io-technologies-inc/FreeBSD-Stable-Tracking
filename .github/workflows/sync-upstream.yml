@@ -79,13 +79,12 @@ jobs:
             if [ -n "$SHIM_BRANCHES" ]; then
               for SHIM in $SHIM_BRANCHES; do
                 SHIM_NAME=$(basename "$SHIM")
-                echo "Collecting tools from $SHIM into shim-tools/$SHIM_NAME..."
+                echo "Collecting tools from $SHIM into shim-tools/..."
                 
                 mkdir -p "/tmp/shim-src"
                 git worktree add /tmp/shim-src "$SHIM"
                 if [ -d "/tmp/shim-src/shim-tools" ]; then
-                  mkdir -p "shim-tools/$SHIM_NAME"
-                  cp -r /tmp/shim-src/shim-tools/* "shim-tools/$SHIM_NAME/"
+                  cp -r /tmp/shim-src/shim-tools/* shim-tools/
                   APPLIED_SHIMS="$APPLIED_SHIMS $SHIM"
                 fi
                 git worktree remove /tmp/shim-src --force || true
@@ -126,19 +125,58 @@ jobs:
             Shims Applied:$APPLIED_SHIMS" $DOWNSTREAM_TIP --force
             git push origin "ds-latest" --force
 
-            git archive --format=zip HEAD -o downstream-latest.zip
+            # Generate the pull-release helper script
+            cat << 'EOF' > pull-release.sh
+#!/usr/bin/env bash
+set -e
+
+TAG="${1:-ds-latest}"
+DEST="${2:-freebsd-release-$TAG}"
+KEEP_GIT=false
+
+shift || true
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --keep-git) KEEP_GIT=true ;;
+        *) DEST="$1" ;;
+    esac
+    shift
+done
+
+ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/wsad-io-technologies-inc/FreeBSD-Stable-Tracking.git")
+echo "Pulling release tag/branch '$TAG' into '$DEST'..."
+
+git clone --depth 1 --branch "$TAG" "$ORIGIN_URL" "$DEST"
+
+if [ "$KEEP_GIT" = false ]; then
+    echo "Cleaning up git metadata..."
+    rm -rf "$DEST/.git"
+    echo "Done! Clean source tree ready in '$DEST'."
+else
+    echo "Done! Cloned with git metadata preserved in '$DEST'."
+fi
+EOF
+            chmod +x pull-release.sh
+
             RELEASE_NOTES="### Downstream Latest Release
             - **Upstream Tip:** \`$PRIMARY_TIP\`
             - **Downstream Tip:** \`$DOWNSTREAM_TIP\`
-            - **Shims Applied:** \`$APPLIED_SHIMS\`"
+            - **Shims Applied:** \`$APPLIED_SHIMS\`
+
+            To pull this release without full repository history, use the included \`pull-release.sh\` script:
+            \`\``bash
+            ./pull-release.sh ds-latest my-source-folder
+            \`\``"
 
             if gh release view "ds-latest" &>/dev/null; then
               gh release delete "ds-latest" --yes --cleanup-tag || true
             fi
-            gh release create "ds-latest" downstream-latest.zip \
+            gh release create "ds-latest" pull-release.sh \
               --title "Downstream Latest Release" \
               --notes "$RELEASE_NOTES" \
               --target "$DOWNSTREAM_TIP"
+
+            rm -f pull-release.sh
           fi
 
           # 4. Process versioned upstream tags for release tags & packages
@@ -177,18 +215,50 @@ jobs:
             Shims Applied:$APPLIED_SHIMS" "$REL_DOWNSTREAM_TIP" --force
             git push origin "ds-$safe_tag_id" --force
 
-            git archive --format=zip HEAD -o downstream-$safe_tag_id.zip
+            cat << 'EOF' > pull-release.sh
+#!/usr/bin/env bash
+set -e
+TAG="${1:-ds-latest}"
+DEST="${2:-freebsd-release-$TAG}"
+KEEP_GIT=false
+shift || true
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --keep-git) KEEP_GIT=true ;;
+        *) DEST="$1" ;;
+    esac
+    shift
+done
+ORIGIN_URL=$(git remote get-url origin 2>/dev/null || echo "https://github.com/wsad-io-technologies-inc/FreeBSD-Stable-Tracking.git")
+echo "Pulling release tag/branch '$TAG' into '$DEST'..."
+git clone --depth 1 --branch "$TAG" "$ORIGIN_URL" "$DEST"
+if [ "$KEEP_GIT" = false ]; then
+    rm -rf "$DEST/.git"
+    echo "Done! Clean source tree ready in '$DEST'."
+else
+    echo "Done! Cloned with git metadata preserved in '$DEST'."
+fi
+EOF
+            chmod +x pull-release.sh
+
             TAG_RELEASE_NOTES="### Downstream Release: $tag
             - **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
-            - **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`"
+            - **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`
+
+            Pull this release using:
+            \`\``bash
+            ./pull-release.sh ds-$safe_tag_id
+            \`\``"
 
             if gh release view "ds-$safe_tag_id" &>/dev/null; then
               gh release delete "ds-$safe_tag_id" --yes --cleanup-tag || true
             fi
-            gh release create "ds-$safe_tag_id" downstream-$safe_tag_id.zip \
+            gh release create "ds-$safe_tag_id" pull-release.sh \
               --title "Downstream Release $tag" \
               --notes "$TAG_RELEASE_NOTES" \
               --target "$REL_DOWNSTREAM_TIP"
+
+            rm -f pull-release.sh
           done
 
           # 5. Process all individual branches for staging
