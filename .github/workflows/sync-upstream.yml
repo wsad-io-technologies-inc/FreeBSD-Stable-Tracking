@@ -33,9 +33,17 @@ jobs:
           git config --global http.version HTTP/1.1
           echo "GH_TOKEN=${{ secrets.PAT_TOKEN }}" >> $GITHUB_ENV
 
+          # Dynamically set GH_REPO to ensure gh CLI targets the downstream repo, not upstream freebsd-src
+          ORIGIN_URL=$(git remote get-url origin)
+          REPO_NAME=$(echo "$ORIGIN_URL" | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?.*|\1|')
+          echo "GH_REPO=$REPO_NAME" >> $GITHUB_ENV
+          echo "Target GitHub repository for gh CLI: $REPO_NAME"
+
       - name: Add FreeBSD Upstream Remote & Fetch Tags
         run: |
-          git remote add upstream https://github.com/freebsd/freebsd-src.git
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/freebsd/freebsd-src.git
+          fi
           git fetch upstream --prune --tags
 
       - name: Overlay Midstream, Build Downstream, Update Latest Pointers & Releases
@@ -233,7 +241,9 @@ jobs:
 
       - name: Add FreeBSD Upstream Remote & Fetch
         run: |
-          git remote add upstream https://github.com/freebsd/freebsd-src.git
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/freebsd/freebsd-src.git
+          fi
           git fetch upstream --prune --tags
 
       - name: Dynamically Sync Upstream History
