@@ -158,15 +158,18 @@ fi
 EOF
             chmod +x pull-release.sh
 
-            RELEASE_NOTES="### Downstream Latest Release
-            - **Upstream Tip:** \`$PRIMARY_TIP\`
-            - **Downstream Tip:** \`$DOWNSTREAM_TIP\`
-            - **Shims Applied:** \`$APPLIED_SHIMS\`
+            RELEASE_NOTES=$(cat <<EOF
+### Downstream Latest Release
+- **Upstream Tip:** \`$PRIMARY_TIP\`
+- **Downstream Tip:** \`$DOWNSTREAM_TIP\`
+- **Shims Applied:** \`$APPLIED_SHIMS\`
 
-            To pull this release without full repository history, use the included \`pull-release.sh\` script:
-            \`\``bash
-            ./pull-release.sh ds-latest my-source-folder
-            \`\``"
+To pull this release without full repository history, use the included \`pull-release.sh\` script:
+\`\`\`bash
+./pull-release.sh ds-latest my-source-folder
+\`\`\`
+EOF
+)
 
             if gh release view "ds-latest" &>/dev/null; then
               gh release delete "ds-latest" --yes --cleanup-tag || true
@@ -241,14 +244,17 @@ fi
 EOF
             chmod +x pull-release.sh
 
-            TAG_RELEASE_NOTES="### Downstream Release: $tag
-            - **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
-            - **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`
+            TAG_RELEASE_NOTES=$(cat <<EOF
+### Downstream Release: $tag
+- **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
+- **Downstream Commit:** \`$REL_DOWNSTREAM_TIP\`
 
-            Pull this release using:
-            \`\``bash
-            ./pull-release.sh ds-$safe_tag_id
-            \`\``"
+Pull this release using:
+\`\`\`bash
+./pull-release.sh ds-$safe_tag_id
+\`\`\`
+EOF
+)
 
             if gh release view "ds-$safe_tag_id" &>/dev/null; then
               gh release delete "ds-$safe_tag_id" --yes --cleanup-tag || true
