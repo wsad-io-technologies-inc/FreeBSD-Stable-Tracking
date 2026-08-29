@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   # ============================================================================
-  # AGENT 1: FAST LANE (Builds Downstream Staging Immediately from Latest)
+  # AGENT 1: FAST LANE (Builds Downstream Staging & Latest Pointers Immediately)
   # ============================================================================
   build-downstream-latest:
     runs-on: ubuntu-latest
@@ -37,26 +37,68 @@ jobs:
           git remote add upstream https://github.com/freebsd/freebsd-src.git
           git fetch upstream --prune --no-tags
 
-      - name: Overlay Midstream and Build Downstream
+      - name: Overlay Midstream, Build Downstream & Update Latest Pointers
         run: |
           git fetch origin --prune
           
           OTHER_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^upstream/(stable/|releng/)' | sort -rV)
           ALL_BRANCHES="upstream/main $OTHER_BRANCHES"
 
+          # 1. Update latest/upstream to the absolute tip of upstream/main (or primary branch)
+          PRIMARY_UPSTREAM="upstream/main"
+          PRIMARY_TIP=$(git rev-parse refs/remotes/$PRIMARY_UPSTREAM 2>/dev/null || echo "")
+          
+          if [ -n "$PRIMARY_TIP" ]; then
+            echo "Updating latest/upstream to $PRIMARY_UPSTREAM ($PRIMARY_TIP)"
+            git checkout -B latest/upstream $PRIMARY_TIP
+            git push origin latest/upstream --force-with-lease
+          fi
+
+          # Fetch all shim branches once
+          SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/middleware/shim-[0-9]{2}-' | sort)
+
+          # 2. Build latest/midstream (combined shims applied on top of latest upstream tip)
+          if [ -n "$PRIMARY_TIP" ]; then
+            echo "Building latest/midstream..."
+            git checkout -B latest/midstream $PRIMARY_TIP
+
+            if [ -n "$SHIM_BRANCHES" ]; then
+              for SHIM in $SHIM_BRANCHES; do
+                if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
+                  cp -r shim-tools /tmp/
+                  git reset HEAD shim-tools/
+                  rm -rf shim-tools/
+                  git checkout -- .
+                  
+                  chmod +x /tmp/shim-tools/master.sh
+                  if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
+                    git add .
+                    git commit -m "Applied automated shim modifications from $SHIM" || true
+                  fi
+                  rm -rf /tmp/shim-tools
+                fi
+              done
+            fi
+
+            git push origin latest/midstream --force-with-lease
+
+            # 3. Update latest/downstream with the fully built latest result
+            echo "Updating latest/downstream..."
+            git checkout -B latest/downstream latest/midstream
+            git push origin latest/downstream --force-with-lease
+          fi
+
+          # 4. Process all individual branches for staging
           for ref in $ALL_BRANCHES; do
-            branch_path=${ref#upstream/}                  
-            safe_name=$(echo "$branch_path" | tr '/' '-')   
+            branch_path=${ref#upstream/}                 
+            safe_name=$(echo "$branch_path" | tr '/' '-')    
 
             echo "Building downstream staging for latest $safe_name..."
 
-            # Ensure we are branching off the absolute newest code, not a cached local reference
             UPSTREAM_TIP=$(git rev-parse refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
             if [ -z "$UPSTREAM_TIP" ]; then continue; fi
 
             git checkout -B downstream/staging-$safe_name $UPSTREAM_TIP
-
-            SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/middleware/shim-[0-9]{2}-' | sort)
 
             if [ -n "$SHIM_BRANCHES" ]; then
               for SHIM in $SHIM_BRANCHES; do
@@ -114,8 +156,8 @@ jobs:
           ALL_BRANCHES="upstream/main $OTHER_BRANCHES"
 
           for ref in $ALL_BRANCHES; do
-            branch_path=${ref#upstream/}                  
-            safe_name=$(echo "$branch_path" | tr '/' '-')   
+            branch_path=${ref#upstream/}                 
+            safe_name=$(echo "$branch_path" | tr '/' '-')    
 
             echo "Processing upstream backfill: $branch_path"
 
@@ -127,7 +169,6 @@ jobs:
               continue 
             fi
 
-            # Dynamically target the start year to avoid looping from 1993 unnecessarily
             START_YEAR=1993
             if [ -n "$ORIGIN_UPSTREAM_TIP" ]; then
               START_YEAR=$(git show -s --format=%cd --date=format:%Y $ORIGIN_UPSTREAM_TIP 2>/dev/null || echo 1993)
