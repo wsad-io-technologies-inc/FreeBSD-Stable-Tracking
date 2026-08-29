@@ -58,10 +58,10 @@ jobs:
             git push origin "us-latest" --force
           fi
 
-          # Fetch all shim branches once
+          # Fetch and numerically sort all shim branches (e.g., shim-00, shim-01...)
           SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/middleware/shim-[0-9]{2}-' | sort)
 
-          # 2. Build latest/midstream (combined shims applied on top of latest upstream tip)
+          # 2. Build latest/midstream (combined shims applied sequentially on top of upstream tip)
           if [ -n "$PRIMARY_TIP" ]; then
             echo "Building latest/midstream..."
             git checkout -B latest/midstream $PRIMARY_TIP
@@ -99,14 +99,14 @@ jobs:
             
             DOWNSTREAM_TIP=$(git rev-parse HEAD)
             
-            # Create annotated tag for latest tracking upstream, downstream, and shims
+            # Create annotated tag tracking upstream commit, downstream commit, and applied shims
             git tag -a "ds-latest" -m "Downstream Latest Build
             Upstream Commit: $PRIMARY_TIP
             Downstream Commit: $DOWNSTREAM_TIP
             Shims Applied:$APPLIED_SHIMS" $DOWNSTREAM_TIP --force
             git push origin "ds-latest" --force
 
-            # Package and publish latest release zip
+            # Package and publish latest release zip via GitHub CLI
             git archive --format=zip HEAD -o downstream-latest.zip
             RELEASE_NOTES="### Downstream Latest Release
             - **Upstream Tip:** \`$PRIMARY_TIP\`
@@ -161,7 +161,7 @@ jobs:
             git tag -f "ms-$safe_tag_id" "$REL_MIDSTREAM_TIP"
             git push origin "ms-$safe_tag_id" --force
 
-            # Create annotated tag linking upstream, downstream, and shims
+            # Create annotated tag linking exact release provenance
             git tag -a "ds-$safe_tag_id" -m "Downstream Release for $tag
             Upstream Tag/Commit: $tag ($TAG_COMMIT)
             Downstream Commit: $REL_MIDSTREAM_TIP
@@ -217,7 +217,7 @@ jobs:
           done
 
   # ============================================================================
-  # AGENT 2: SLOW LANE (Methodically Backfills Upstream History)
+  # AGENT 2: SLOW LANE (Methodically Backfills Upstream History in Chunks)
   # ============================================================================
   backfill-upstream-history:
     runs-on: ubuntu-latest
@@ -279,7 +279,8 @@ jobs:
 
                 if [ -z "$TARGET_HASH" ]; then continue; fi
                 
-                if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTERAM_TIP" 2>/dev/null; then
+                # Corrected variable spelling bug here: ORIGIN_UPSTREAM_TIP
+                if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
                   continue
                 fi
 
