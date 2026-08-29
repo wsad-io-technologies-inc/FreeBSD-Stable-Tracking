@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   # ============================================================================
-  # AGENT 1: FAST LANE (Builds Downstream Staging & Latest Pointers Immediately)
+  # AGENT 1: FAST LANE (Builds Downstream Staging, Latest Pointers & Releases)
   # ============================================================================
   build-downstream-latest:
     runs-on: ubuntu-latest
@@ -31,20 +31,21 @@ jobs:
           git config --global core.compression 9
           git config --global http.postBuffer 1073741824
           git config --global http.version HTTP/1.1
+          echo "GH_TOKEN=${{ secrets.PAT_TOKEN }}" >> $GITHUB_ENV
 
-      - name: Add FreeBSD Upstream Remote & Fetch
+      - name: Add FreeBSD Upstream Remote & Fetch Tags
         run: |
           git remote add upstream https://github.com/freebsd/freebsd-src.git
-          git fetch upstream --prune --no-tags
+          git fetch upstream --prune --tags
 
-      - name: Overlay Midstream, Build Downstream & Update Latest Pointers
+      - name: Overlay Midstream, Build Downstream, Update Latest Pointers & Releases
         run: |
           git fetch origin --prune
           
           OTHER_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^upstream/(stable/|releng/)' | sort -rV)
           ALL_BRANCHES="upstream/main $OTHER_BRANCHES"
 
-          # 1. Update latest/upstream to the absolute tip of upstream/main (or primary branch)
+          # 1. Update latest/upstream to the absolute tip of upstream/main
           PRIMARY_UPSTREAM="upstream/main"
           PRIMARY_TIP=$(git rev-parse refs/remotes/$PRIMARY_UPSTREAM 2>/dev/null || echo "")
           
@@ -52,6 +53,9 @@ jobs:
             echo "Updating latest/upstream to $PRIMARY_UPSTREAM ($PRIMARY_TIP)"
             git checkout -B latest/upstream $PRIMARY_TIP
             git push origin latest/upstream --force-with-lease
+            
+            git tag -f "us-latest" $PRIMARY_TIP
+            git push origin "us-latest" --force
           fi
 
           # Fetch all shim branches once
@@ -62,6 +66,7 @@ jobs:
             echo "Building latest/midstream..."
             git checkout -B latest/midstream $PRIMARY_TIP
 
+            APPLIED_SHIMS=""
             if [ -n "$SHIM_BRANCHES" ]; then
               for SHIM in $SHIM_BRANCHES; do
                 if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
@@ -74,6 +79,7 @@ jobs:
                   if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
                     git add .
                     git commit -m "Applied automated shim modifications from $SHIM" || true
+                    APPLIED_SHIMS="$APPLIED_SHIMS $SHIM"
                   fi
                   rm -rf /tmp/shim-tools
                 fi
@@ -81,14 +87,103 @@ jobs:
             fi
 
             git push origin latest/midstream --force-with-lease
+            
+            MIDSTREAM_TIP=$(git rev-parse HEAD)
+            git tag -f "ms-latest" $MIDSTREAM_TIP
+            git push origin "ms-latest" --force
 
             # 3. Update latest/downstream with the fully built latest result
             echo "Updating latest/downstream..."
             git checkout -B latest/downstream latest/midstream
             git push origin latest/downstream --force-with-lease
+            
+            DOWNSTREAM_TIP=$(git rev-parse HEAD)
+            
+            # Create annotated tag for latest tracking upstream, downstream, and shims
+            git tag -a "ds-latest" -m "Downstream Latest Build
+            Upstream Commit: $PRIMARY_TIP
+            Downstream Commit: $DOWNSTREAM_TIP
+            Shims Applied:$APPLIED_SHIMS" $DOWNSTREAM_TIP --force
+            git push origin "ds-latest" --force
+
+            # Package and publish latest release zip
+            git archive --format=zip HEAD -o downstream-latest.zip
+            RELEASE_NOTES="### Downstream Latest Release
+            - **Upstream Tip:** \`$PRIMARY_TIP\`
+            - **Downstream Tip:** \`$DOWNSTREAM_TIP\`
+            - **Shims Applied:** \`$APPLIED_SHIMS\`"
+
+            if gh release view "ds-latest" &>/dev/null; then
+              gh release delete "ds-latest" --yes --cleanup-tag || true
+            fi
+            gh release create "ds-latest" downstream-latest.zip \
+              --title "Downstream Latest Release" \
+              --notes "$RELEASE_NOTES"
           fi
 
-          # 4. Process all individual branches for staging
+          # 4. Process versioned upstream tags for release tags & packages
+          UPSTREAM_TAGS=$(git tag -l | grep -E '.*-RELEASE$' | tail -n 15)
+          for tag in $UPSTREAM_TAGS; do
+            safe_tag_id=$(echo "$tag" | tr '/' '-')
+            echo "Processing versioned release tag: $tag ($safe_tag_id)"
+
+            TAG_COMMIT=$(git rev-parse "$tag" 2>/dev/null || echo "")
+            if [ -z "$TAG_COMMIT" ]; then continue; fi
+
+            # us-<tag>
+            git tag -f "us-$safe_tag_id" "$TAG_COMMIT"
+            git push origin "us-$safe_tag_id" --force
+
+            # Build midstream/downstream for this tagged commit
+            git checkout -B temp-release-$safe_tag_id "$TAG_COMMIT"
+            
+            TAG_APPLIED_SHIMS=""
+            if [ -n "$SHIM_BRANCHES" ]; then
+              for SHIM in $SHIM_BRANCHES; do
+                if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
+                  cp -r shim-tools /tmp/
+                  git reset HEAD shim-tools/
+                  rm -rf shim-tools/
+                  git checkout -- .
+                  
+                  chmod +x /tmp/shim-tools/master.sh
+                  if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
+                    git add .
+                    git commit -m "Applied automated shim modifications from $SHIM for $tag" || true
+                    TAG_APPLIED_SHIMS="$TAG_APPLIED_SHIMS $SHIM"
+                  fi
+                  rm -rf /tmp/shim-tools
+                fi
+              done
+            fi
+
+            REL_MIDSTREAM_TIP=$(git rev-parse HEAD)
+            git tag -f "ms-$safe_tag_id" "$REL_MIDSTREAM_TIP"
+            git push origin "ms-$safe_tag_id" --force
+
+            # Create annotated tag linking upstream, downstream, and shims
+            git tag -a "ds-$safe_tag_id" -m "Downstream Release for $tag
+            Upstream Tag/Commit: $tag ($TAG_COMMIT)
+            Downstream Commit: $REL_MIDSTREAM_TIP
+            Shims Applied:$TAG_APPLIED_SHIMS" "$REL_MIDSTREAM_TIP" --force
+            git push origin "ds-$safe_tag_id" --force
+
+            # Package source archive and publish GitHub Release
+            git archive --format=zip HEAD -o downstream-$safe_tag_id.zip
+            TAG_RELEASE_NOTES="### Downstream Release: $tag
+            - **Upstream Tag:** \`$tag\` (\`$TAG_COMMIT\`)
+            - **Downstream Commit:** \`$REL_MIDSTREAM_TIP\`
+            - **Shims Applied:** \`$TAG_APPLIED_SHIMS\`"
+
+            if gh release view "ds-$safe_tag_id" &>/dev/null; then
+              gh release delete "ds-$safe_tag_id" --yes --cleanup-tag || true
+            fi
+            gh release create "ds-$safe_tag_id" downstream-$safe_tag_id.zip \
+              --title "Downstream Release $tag" \
+              --notes "$TAG_RELEASE_NOTES"
+          done
+
+          # 5. Process all individual branches for staging
           for ref in $ALL_BRANCHES; do
             branch_path=${ref#upstream/}                 
             safe_name=$(echo "$branch_path" | tr '/' '-')    
@@ -146,7 +241,7 @@ jobs:
       - name: Add FreeBSD Upstream Remote & Fetch
         run: |
           git remote add upstream https://github.com/freebsd/freebsd-src.git
-          git fetch upstream --prune --no-tags
+          git fetch upstream --prune --tags
 
       - name: Dynamically Sync Upstream History
         run: |
@@ -184,7 +279,7 @@ jobs:
 
                 if [ -z "$TARGET_HASH" ]; then continue; fi
                 
-                if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
+                if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$TARGET_HASH" "$ORIGIN_UPSTERAM_TIP" 2>/dev/null; then
                   continue
                 fi
 
@@ -201,7 +296,7 @@ jobs:
                     if [ -n "$ORIGIN_UPSTREAM_TIP" ] && git merge-base --is-ancestor "$SUB_HASH" "$ORIGIN_UPSTREAM_TIP" 2>/dev/null; then
                       continue
                     fi
-                      
+                    
                     if ! git push origin ${SUB_HASH}:refs/heads/upstream/$safe_name; then
                       echo "::warning::Hard threshold hit on $SUB_DATE. Halting backfill for $safe_name."
                       SYNC_COMPLETE=false
