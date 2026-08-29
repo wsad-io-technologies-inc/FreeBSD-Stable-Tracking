@@ -1,4 +1,42 @@
-- name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
+name: Sync Upstream FreeBSD and Build Staging
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync-and-stage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Configure Git Identity & Network Tuning
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Maximize compression and buffer size for heavy object packfiles
+          git config --global core.compression 9
+          git config --global http.postBuffer 1073741824
+          git config --global http.version HTTP/1.1
+
+      - name: Add FreeBSD Upstream Remote & Fetch
+        run: |
+          git remote add upstream https://github.com/freebsd/freebsd-src.git
+          git fetch upstream --prune --no-tags
+
+      - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
           # Prioritize main first, then reverse-version sort the rest (newest to oldest)
           OTHER_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^upstream/(stable/|releng/)' | sort -rV)
