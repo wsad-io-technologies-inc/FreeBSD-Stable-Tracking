@@ -4,19 +4,11 @@ set -euo pipefail
 REPO_PATH="${1:-$PWD}"
 OS_NAME="${2:-YourOSName}"
 
-echo "[$OS_NAME] Executing Shim 00: Root Overlay..."
+echo "[$OS_NAME] Executing Shim 01: Rebrand Engine..."
 
-# Load configuration if present
-if [ -f "$PWD/shim-tools/config.cfg" ]; then
-    source "$PWD/shim-tools/config.cfg"
-fi
+# Execute pipeline tasks with failure detection
+bash "$PWD/shim-tools/scripts/01-rebrand-strings.sh" "$REPO_PATH" "$OS_NAME"
+bash "$PWD/shim-tools/scripts/02-update-release-conf.sh" "$REPO_PATH" "$OS_NAME"
+bash "$PWD/shim-tools/scripts/03-sanity-check.sh" "$REPO_PATH" "$OS_NAME"
 
-# Run ordered sub-scripts
-for script in "$PWD/shim-tools/scripts/"*.sh; do
-    if [ -f "$script" ]; then
-        echo "Running $(basename "$script")..."
-        bash "$script" "$REPO_PATH" "$OS_NAME"
-    fi
-done
-
-echo "Shim 00 completed successfully."
+echo "Shim 01 rebranding completed successfully."
