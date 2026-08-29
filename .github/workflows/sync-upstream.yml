@@ -38,7 +38,6 @@ jobs:
 
       - name: Dynamically Sync Upstream, Overlay Midstream, and Build Downstream
         run: |
-          # Awk strips leading spaces, and the ^ anchor prevents matching origin/upstream/...
           for ref in $(git branch -r | awk '{print $1}' | grep -E '^upstream/(main$|stable/|releng/)'); do
             branch_path=${ref#upstream/}                  
             safe_name=$(echo "$branch_path" | tr '/' '-')   
@@ -47,7 +46,6 @@ jobs:
             echo "Processing upstream branch: $branch_path"
             echo "=================================================="
 
-            # Fetch existing remote tracking references from origin
             git fetch origin --prune
 
             UPSTREAM_TIP=$(git rev-parse refs/remotes/upstream/$branch_path)
@@ -61,28 +59,28 @@ jobs:
             if [ "$ORIGIN_UPSTREAM_TIP" != "$UPSTREAM_TIP" ]; then
               echo "Branch 'upstream/$safe_name' is missing or behind upstream. Verifying timeline..."
 
-              # Generate 1-Year Intervals from 1993 to Current Year
               CURRENT_YEAR=$(date +%Y)
-              YEARS=$(seq 1993 $CURRENT_YEAR)
+              
+              # Loop through years, and then quarterly months
+              for year in $(seq 1993 $CURRENT_YEAR); do
+                for month in "01" "04" "07" "10"; do
+                  EPOCH_DATE="${year}-${month}-01"
+                  TARGET_HASH=$(git log -1 --format="%H" --until="$EPOCH_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
 
-              for year in $YEARS; do
-                EPOCH_DATE="${year}-01-01"
-                TARGET_HASH=$(git log -1 --format="%H" --until="$EPOCH_DATE" refs/remotes/upstream/$branch_path 2>/dev/null || echo "")
-
-                if [ -n "$TARGET_HASH" ]; then
-                  # Check if origin already has this object/commit
-                  if ! git branch -r --contains "$TARGET_HASH" | grep -q "origin/upstream/$safe_name"; then
-                    echo "Backfilling historical chunk for year $year ($TARGET_HASH)..."
-                    if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
-                      echo "::warning::Network threshold reached during $year backfill for $safe_name. Halting backfill for this run."
-                      SYNC_COMPLETE=false
-                      break
+                  if [ -n "$TARGET_HASH" ]; then
+                    if ! git branch -r --contains "$TARGET_HASH" | grep -q "origin/upstream/$safe_name"; then
+                      echo "Backfilling historical chunk for $EPOCH_DATE ($TARGET_HASH)..."
+                      
+                      if ! git push origin ${TARGET_HASH}:refs/heads/upstream/$safe_name; then
+                        echo "::warning::Network threshold reached during $EPOCH_DATE backfill for $safe_name. Halting backfill for this run."
+                        SYNC_COMPLETE=false
+                        break 2 # Breaks out of both month and year loops safely
+                      fi
                     fi
                   fi
-                fi
+                done
               done
 
-              # Final push attempt for the exact head tip if backfilling cleared smoothly
               if [ "$SYNC_COMPLETE" = true ]; then
                 echo "Pushing final tip ($UPSTREAM_TIP) to origin/upstream/$safe_name..."
                 if ! git push origin refs/remotes/upstream/$branch_path:refs/heads/upstream/$safe_name --force-with-lease; then
@@ -94,37 +92,50 @@ jobs:
               echo "Branch 'upstream/$safe_name' is 100% in sync with FreeBSD upstream."
             fi
 
-            # Gate Check: Stop early if history backfill is still incomplete for this branch
             if [ "$SYNC_COMPLETE" = false ]; then
               echo "::notice::Skipping Midstream overlay and Downstream staging for $safe_name until backfill completes."
               continue
             fi
 
             # -----------------------------------------------------------------
-            # STATE 2: MIDSTREAM OVERLAY & DOWNSTREAM STAGING BUILD
+            # STATE 2: SEQUENTIAL SHIM OVERLAY & DOWNSTREAM STAGING BUILD
             # -----------------------------------------------------------------
             echo "Building downstream staging for $safe_name..."
 
-            # 1. Setup local base from the verified upstream reference
             git checkout -B downstream/staging-$safe_name refs/remotes/upstream/$branch_path
 
-            # 2. Check and merge midstream shims if present on origin
-            MIDSTREAM_BRANCH="midstream/$safe_name"
-            
-            if git ls-remote --exit-code --heads origin "$MIDSTREAM_BRANCH" > /dev/null 2>&1; then
-              echo "Midstream branch '$MIDSTREAM_BRANCH' found. Overlaying changes..."
-              git fetch origin "$MIDSTREAM_BRANCH"
-              
-              if ! git merge --no-edit origin/"$MIDSTREAM_BRANCH"; then
-                echo "::error::Merge conflict detected while applying $MIDSTREAM_BRANCH to $safe_name!"
-                git merge --abort
-                echo "Skipping downstream build for $safe_name until conflict is resolved manually."
-                continue
-              fi
-            else
-              echo "Midstream branch '$MIDSTREAM_BRANCH' not found. Proceeding with vanilla upstream."
+            # Retrieve all shim branches in numbered order
+            SHIM_BRANCHES=$(git branch -r | awk '{print $1}' | grep -E '^origin/middleware/shim-[0-9]{2}-' | sort)
+
+            if [ -n "$SHIM_BRANCHES" ]; then
+              for SHIM in $SHIM_BRANCHES; do
+                echo "Extracting tools from $SHIM..."
+                
+                # Extract only the tooling directory from the shim branch
+                if git checkout $SHIM -- shim-tools/ 2>/dev/null; then
+                  cp -r shim-tools /tmp/
+                  
+                  # Wipe the script files from the Git tracking tree
+                  git reset HEAD shim-tools/
+                  rm -rf shim-tools/
+                  git checkout -- .
+                  
+                  # Execute the master script against the clean source tree
+                  chmod +x /tmp/shim-tools/master.sh
+                  if /tmp/shim-tools/master.sh "$PWD" "YourOSName"; then
+                    git add .
+                    git commit -m "Applied automated shim modifications from $SHIM" || true
+                  else
+                    echo "::error::Shim validation failed for $SHIM. Aborting build."
+                    exit 1
+                  fi
+                  
+                  rm -rf /tmp/shim-tools
+                else
+                  echo "No shim-tools/ directory found in $SHIM. Skipping."
+                fi
+              done
             fi
 
-            # 3. Push the final combined staging candidate to downstream
             git push origin downstream/staging-$safe_name --force-with-lease
           done
