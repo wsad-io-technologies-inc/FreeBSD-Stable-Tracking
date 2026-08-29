@@ -147,14 +147,14 @@ jobs:
             chmod +x pull-release.sh
 
             RELEASE_NOTES="### Downstream Latest Release
-- **Upstream Tip:** \`$PRIMARY_TIP\`
-- **Downstream Tip:** \`$DOWNSTREAM_TIP\`
-- **Shims Applied:** \`$APPLIED_SHIMS\`
+            - **Upstream Tip:** \`$PRIMARY_TIP\`
+            - **Downstream Tip:** \`$DOWNSTREAM_TIP\`
+            - **Shims Applied:** \`$APPLIED_SHIMS\`
 
-To pull this release without full repository history, use the included \`pull-release.sh\` script:
-\`\`\`bash
-./pull-release.sh ds-latest my-source-folder
-\`\`\`"
+            To pull this release without full repository history, use the included \`pull-release.sh\` script:
+            \`\`\`bash
+            ./pull-release.sh ds-latest my-source-folder
+            \`\`\`"
 
             if gh release view "ds-latest" &>/dev/null; then
               gh release delete "ds-latest" --yes --cleanup-tag || true
