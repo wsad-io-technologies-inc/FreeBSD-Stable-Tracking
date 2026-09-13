@@ -3017,7 +3017,7 @@ pci_has_pme(device_t dev, int state)
 
 	if (state < PCI_POWERSTATE_D0 || state > PCI_POWERSTATE_MAX)
 		return (false);
-	return (cfg->pp.pp_location != 0 &&
+	return (pci_has_pm(dev) &&
 	    (cfg->pp.pp_cap & pme_mask[state]) != 0);
 }
 

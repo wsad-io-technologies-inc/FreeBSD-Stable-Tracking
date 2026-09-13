@@ -517,6 +517,11 @@ pci_is_vga_memory_range(rman_res_t start, rman_res_t end)
 #define	PCI_POWERSTATE_D1	1
 #define	PCI_POWERSTATE_D2	2
 #define	PCI_POWERSTATE_D3	3
+#define	PCI_POWERSTATE_D3_HOT	PCI_POWERSTATE_D3
+/* D3cold is a PME query state, not a supported power-state transition. */
+#define	PCI_POWERSTATE_D3_COLD	4
+#define	PCI_POWERSTATE_MAX	PCI_POWERSTATE_D3_COLD
+#define	PCI_POWERSTATE_COUNT	5
 #define	PCI_POWERSTATE_UNKNOWN	-1
 
 static __inline int
